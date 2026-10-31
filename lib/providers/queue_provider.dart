@@ -1,25 +1,59 @@
+// lib/providers/queue_provider.dart
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
+
 import 'package:waiting_room_app/models/client.dart';
+import 'package:waiting_room_app/services/local_queue_service.dart';
+import 'package:waiting_room_app/services/geolocation_service.dart';
 
 class QueueProvider extends ChangeNotifier {
+  // ── Dependencies (injectable for testing) ──────────────────────────────────
+  final SupabaseClient? _supabase;
+  final LocalQueueService _localDb;
+  final GeolocationService _geoService;
+
+  // ── State ──────────────────────────────────────────────────────────────────
   final List<Client> _clients = [];
   List<Client> get clients => List.unmodifiable(_clients);
 
-  final SupabaseClient? _supabase;
   RealtimeChannel? _channel;
+  bool _isDisposed = false; // Guard against notifyListeners() after dispose()
 
-  QueueProvider({SupabaseClient? supabaseClient})
-      : _supabase = supabaseClient ?? _getSafeSupabaseClient() {
-    if (_supabase != null) {
-      _fetchInitialClients();
-      _setupRealtimeSubscription();
-    }
+  // ── Constructors ───────────────────────────────────────────────────────────
+
+  /// Default constructor for production use.
+  /// GeolocationService and LocalQueueService can be injected for testing.
+  QueueProvider({
+    SupabaseClient? supabaseClient,
+    GeolocationService? geoService,
+    LocalQueueService? localDb,
+  })  : _supabase = supabaseClient ?? _getSafeSupabaseClient(),
+        _geoService = geoService ?? GeolocationService(),
+        _localDb = localDb ?? LocalQueueService() {
+    _initialize();
   }
 
-  // Constructors for testing
-  QueueProvider.forTesting(SupabaseClient supabase) : _supabase = supabase;
-  QueueProvider.mock(SupabaseClient supabase) : _supabase = supabase;
+  /// Testing constructor: accepts a real Supabase client (integration tests).
+  QueueProvider.forTesting(SupabaseClient supabase)
+      : _supabase = supabase,
+        _geoService = GeolocationService(),
+        _localDb = LocalQueueService() {
+    _initialize();
+  }
+
+  /// Mock-friendly constructor for unit tests with full injection.
+  QueueProvider.withDependencies({
+    required SupabaseClient? supabaseClient,
+    required GeolocationService geoService,
+    required LocalQueueService localDb,
+  })  : _supabase = supabaseClient,
+        _geoService = geoService,
+        _localDb = localDb {
+    _initialize();
+  }
 
   static SupabaseClient? _getSafeSupabaseClient() {
     try {
@@ -29,61 +63,64 @@ class QueueProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> _fetchInitialClients() async {
-    final client = _supabase;
-    if (client == null) return;
-    try {
-      final response = await client
-          .from('clients')
-          .select()
-          .order('created_at', ascending: true);
+  // ── Initialization ─────────────────────────────────────────────────────────
 
-      _clients.clear();
-      for (final item in response) {
-        _clients.add(Client.fromMap(item));
-      }
-      notifyListeners();
-    } catch (e) {
-      debugPrint('Error fetching clients: $e');
+  Future<void> _initialize() async {
+    // 1. Load local DB immediately → UI shows data even offline
+    await _loadLocalQueue();
+
+    // 2. Try to sync any pending records to Supabase
+    unawaited(_syncLocalToRemote());
+
+    // 3. Subscribe to Supabase real-time changes
+    _setupRealtimeSubscription();
+  }
+
+  Future<void> _loadLocalQueue() async {
+    if (_isDisposed) return; // Don't update state after disposal
+    final rows = await _localDb.getClients();
+    if (_isDisposed) return; // Check again after async gap
+    _clients.clear();
+    for (final row in rows) {
+      _clients.add(Client.fromMap(row));
     }
+    notifyListeners();
   }
 
-  void _setupRealtimeSubscription() {
-    final client = _supabase;
-    if (client == null) return;
-    _channel = client
-        .channel('public:clients')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'clients',
-          callback: (payload) {
-            final record = payload.newRecord;
-            if (record.isNotEmpty) {
-              final newClient = Client.fromMap(record);
-              if (!_clients.any((c) => c.id == newClient.id)) {
-                _clients.add(newClient);
-                _clients.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-                notifyListeners();
-              }
-            }
-          },
-        )
-        .onPostgresChanges(
-          event: PostgresChangeEvent.delete,
-          schema: 'public',
-          table: 'clients',
-          callback: (payload) {
-            final oldRecord = payload.oldRecord;
-            final deletedId = oldRecord['id'];
-            if (deletedId != null) {
-              _clients.removeWhere((c) => c.id == deletedId);
-              notifyListeners();
-            }
-          },
-        )
-        .subscribe();
+  // ── Sync Logic ─────────────────────────────────────────────────────────────
+
+  /// Uploads all unsynced local records to Supabase.
+  /// Called on startup and after each addClient().
+  Future<void> _syncLocalToRemote() async {
+    final supabase = _supabase;
+    if (supabase == null) return;
+
+    final unsynced = await _localDb.getUnsyncedClients();
+    for (final row in unsynced) {
+      try {
+        // Build the Supabase record (remove local-only fields)
+        final remoteRecord = {
+          'id': row['id'],
+          'name': row['name'],
+          'created_at': row['created_at'],
+          if (row['lat'] != null) 'lat': row['lat'],
+          if (row['lng'] != null) 'lng': row['lng'],
+        };
+
+        await supabase.from('clients').upsert(remoteRecord);
+        await _localDb.markClientAsSynced(row['id'] as String);
+        debugPrint('Synced client: ${row['name']}');
+      } catch (e) {
+        // Don't crash — continue syncing other items, retry next time
+        debugPrint('Sync failed for ${row['id']}: $e');
+      }
+    }
+
+    // Refresh UI to show updated sync status
+    await _loadLocalQueue();
   }
+
+  // ── Public Actions ─────────────────────────────────────────────────────────
 
   Future<String?> addClient(String name) async {
     final trimmed = name.trim();
@@ -92,57 +129,61 @@ class QueueProvider extends ChangeNotifier {
       return 'Client name cannot be empty';
     }
 
-    final client = _supabase;
-    if (client == null) {
-      _clients.add(Client(
-        id: UniqueKey().toString(),
-        name: trimmed,
-        createdAt: DateTime.now(),
-      ));
-      notifyListeners();
-      return null;
-    }
+    // Get location (returns null if denied — that's OK)
+    final position = await _geoService.getCurrentPosition();
 
-    try {
-      final inserted = await client
-          .from('clients')
-          .insert({'name': trimmed})
-          .select()
-          .single();
+    // Create the client record
+    final newClient = Client(
+      id: const Uuid().v4(),
+      name: trimmed,
+      createdAt: DateTime.now(),
+      lat: position?.latitude,
+      lng: position?.longitude,
+      isSynced: false, // starts as local-only
+    );
 
-      final newClient = Client.fromMap(inserted);
-      if (!_clients.any((c) => c.id == newClient.id)) {
-        _clients.add(newClient);
-        _clients.sort((a, b) => a.createdAt.compareTo(b.createdAt));
-        notifyListeners();
-      }
-      debugPrint('Client added: $trimmed');
-      return null;
-    } catch (e) {
-      debugPrint('Failed to add client: $e');
-      return e.toString();
-    }
+    // Save locally first (works offline)
+    await _localDb.insertClientLocally({
+      'id': newClient.id,
+      'name': newClient.name,
+      'lat': newClient.lat,
+      'lng': newClient.lng,
+      'created_at': newClient.createdAt.toIso8601String(),
+      'is_synced': 0,
+    });
+
+    // Update UI immediately (don't wait for Supabase)
+    _clients.add(newClient);
+    _clients.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    notifyListeners();
+
+    // Sync to Supabase in background (non-blocking — keeps UI responsive)
+    unawaited(_syncLocalToRemote());
+
+    return null; // null = success
   }
 
   Future<String?> removeClient(String id) async {
-    final client = _supabase;
-    if (client == null) {
-      _clients.removeWhere((c) => c.id == id || c.name == id);
-      notifyListeners();
-      return null;
+    // 1. Remove from local UI immediately
+    _clients.removeWhere((c) => c.id == id || c.name == id);
+    notifyListeners();
+
+    // 2. Remove from local DB
+    await _localDb.deleteClient(id);
+
+    // 3. Sync deletion to Supabase in background (non-blocking, offline-safe)
+    final supabase = _supabase;
+    if (supabase != null) {
+      try {
+        await supabase.from('clients').delete().eq('id', id);
+        debugPrint('Client removed from Supabase: $id');
+      } catch (e) {
+        // Offline or network error: local removal succeeds regardless
+        debugPrint('Remote delete failed (offline/network): $e');
+      }
     }
 
-    try {
-      _clients.removeWhere((c) => c.id == id || c.name == id);
-      notifyListeners();
-      await client.from('clients').delete().eq('id', id);
-      debugPrint('Client removed: $id');
-      return null;
-    } catch (e) {
-      debugPrint('Failed to remove client: $e');
-      _fetchInitialClients();
-      return e.toString();
-    }
+    return null; // Local removal is always successful in offline-first
   }
 
   Future<String?> nextClient() async {
@@ -156,12 +197,60 @@ class QueueProvider extends ChangeNotifier {
     return result;
   }
 
+  // ── Real-time Subscription ─────────────────────────────────────────────────
+
+  void _setupRealtimeSubscription() {
+    final supabase = _supabase;
+    if (supabase == null) return;
+
+    _channel = supabase
+        .channel('public:clients')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'clients',
+          callback: (payload) {
+            final record = payload.newRecord;
+            if (record.isNotEmpty) {
+              final newClient = Client.fromMap(record);
+              if (!_clients.any((c) => c.id == newClient.id)) {
+                _clients.add(newClient);
+                _clients.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+                // Also persist in local DB as synced (came from Supabase)
+                _localDb.insertClientLocally({
+                  ...record,
+                  'is_synced': 1,
+                });
+                notifyListeners();
+              }
+            }
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.delete,
+          schema: 'public',
+          table: 'clients',
+          callback: (payload) {
+            final deletedId = payload.oldRecord['id'];
+            if (deletedId != null) {
+              _clients.removeWhere((c) => c.id == deletedId);
+              _localDb.deleteClient(deletedId as String);
+              notifyListeners();
+            }
+          },
+        )
+        .subscribe();
+  }
+
+  // ── Dispose ────────────────────────────────────────────────────────────────
+
   @override
   void dispose() {
+    _isDisposed = true; // Set before super.dispose() to block any in-flight async calls
     final channel = _channel;
-    final client = _supabase;
-    if (channel != null && client != null) {
-      client.removeChannel(channel);
+    final supabase = _supabase;
+    if (channel != null && supabase != null) {
+      supabase.removeChannel(channel);
     }
     super.dispose();
   }

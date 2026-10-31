@@ -48,3 +48,9 @@ app.*.map.json
 .widget_preview/
 
 .env
+
+# Temporary MS Office files
+~$*
+
+# Android build artifacts
+android/build/

@@ -83,28 +83,37 @@ class _WaitingRoomScreenState extends State<WaitingRoomScreen> {
     if (name.isEmpty) return;
 
     setState(() => _isLoading = true);
-    final error = await context.read<QueueProvider>().addClient(name);
-    if (!mounted) return;
-    setState(() => _isLoading = false);
+    try {
+      final error = await context.read<QueueProvider>().addClient(name);
+      if (!mounted) return;
 
-    if (error != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Erreur Supabase (RLS) : $error',
-            style: const TextStyle(fontWeight: FontWeight.bold),
+      if (error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Erreur : $error',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            backgroundColor: Colors.red.shade700,
+            duration: const Duration(seconds: 5),
           ),
-          backgroundColor: Colors.red.shade700,
-          duration: const Duration(seconds: 6),
-          action: SnackBarAction(
-            label: 'OK',
-            textColor: Colors.white,
-            onPressed: () {},
+        );
+      } else {
+        _controller.clear();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur: $e'),
+            backgroundColor: Colors.red.shade700,
           ),
-        ),
-      );
-    } else {
-      _controller.clear();
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
@@ -188,10 +197,40 @@ class _WaitingRoomScreenState extends State<WaitingRoomScreen> {
                               style:
                                   const TextStyle(fontWeight: FontWeight.bold),
                             ),
-                            subtitle: Text(
-                              dateStr,
-                              style: const TextStyle(
-                                  fontSize: 12, color: Colors.grey),
+                            subtitle: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  dateStr,
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Colors.grey),
+                                ),
+                                Row(
+                                  children: [
+                                    Icon(
+                                      client.lat == null
+                                          ? Icons.location_off
+                                          : Icons.location_on,
+                                      size: 14,
+                                      color: client.lat == null
+                                          ? Colors.grey.shade400
+                                          : Colors.blue.shade700,
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      client.lat == null
+                                          ? 'Location not captured'
+                                          : '${client.lat!.toStringAsFixed(4)}, ${client.lng!.toStringAsFixed(4)}',
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: client.lat == null
+                                            ? Colors.grey.shade500
+                                            : Colors.blue.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                             trailing: IconButton(
                               icon: const Icon(Icons.delete, color: Colors.red),
