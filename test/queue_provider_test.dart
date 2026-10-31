@@ -1,8 +1,22 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 import 'package:waiting_room_app/models/client.dart';
-import 'package:waiting_room_app/queue_provider.dart';
+import 'package:waiting_room_app/providers/queue_provider.dart';
+import 'package:waiting_room_app/services/geolocation_service.dart';
+import 'package:waiting_room_app/services/local_queue_service.dart';
+
+class _FakeGeoService extends GeolocationService {
+  @override
+  Future<Position?> getCurrentPosition() async => null;
+}
 
 void main() {
+  setUpAll(() {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  });
+
   group('Client Model Tests', () {
     test('Client.fromMap should correctly deserialize map data', () {
       final now = DateTime.now();
@@ -46,9 +60,23 @@ void main() {
   });
 
   group('QueueProvider Local & Unit Tests', () {
-    test('should add a client to the queue', () async {
-      final provider = QueueProvider();
+    late LocalQueueService localDb;
+    late QueueProvider provider;
 
+    setUp(() {
+      localDb = LocalQueueService(inMemory: true);
+      provider = QueueProvider(
+        geoService: _FakeGeoService(),
+        localDb: localDb,
+      );
+    });
+
+    tearDown(() async {
+      provider.dispose();
+      await localDb.close();
+    });
+
+    test('should add a client to the queue', () async {
       await provider.addClient('Alice');
 
       expect(provider.clients.length, 1);
@@ -56,8 +84,6 @@ void main() {
     });
 
     test('should not add client with empty or whitespace name', () async {
-      final provider = QueueProvider();
-
       await provider.addClient('   ');
       await provider.addClient('');
 
@@ -65,8 +91,6 @@ void main() {
     });
 
     test('should remove a client by id', () async {
-      final provider = QueueProvider();
-
       await provider.addClient('Alice');
       await provider.addClient('Bob');
       final firstId = provider.clients.first.id;
@@ -78,8 +102,6 @@ void main() {
     });
 
     test('should remove the first client when nextClient() is called', () async {
-      final provider = QueueProvider();
-
       await provider.addClient('Client A');
       await provider.addClient('Client B');
 
@@ -90,8 +112,6 @@ void main() {
     });
 
     test('should handle nextClient() gracefully on empty queue', () async {
-      final provider = QueueProvider();
-
       expect(provider.clients.isEmpty, isTrue);
       await provider.nextClient();
       expect(provider.clients.isEmpty, isTrue);

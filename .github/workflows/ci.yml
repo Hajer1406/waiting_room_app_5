@@ -16,6 +16,12 @@ jobs:
         with:
           flutter-version: '3.47.5'
 
+      - name: Create .env file for CI
+        run: |
+          touch .env
+          echo "SUPABASE_URL=https://dymepxyaervslablepnw.supabase.co" >> .env
+          echo "SUPABASE_ANON_KEY=dummy_key" >> .env
+
       - name: Install dependencies
         run: flutter pub get
 

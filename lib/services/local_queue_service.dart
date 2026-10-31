@@ -8,8 +8,10 @@ import 'package:path/path.dart';
 /// then synced to Supabase when internet is available.
 /// Includes an in-memory fallback for platforms like Web where sqflite is not available.
 class LocalQueueService {
-  // Static singleton so the DB is only opened once per app lifecycle
+  // Static singleton for production disk database
   static Database? _database;
+  // Instance database for inMemory: true (unit tests)
+  Database? _instanceDb;
   static const String tableName = 'local_clients';
 
   final bool _inMemory;
@@ -21,7 +23,12 @@ class LocalQueueService {
   /// Returns the database, initializing it if necessary.
   Future<Database?> get database async {
     if (_useFallback) return null;
-    if (_database != null && !_inMemory) return _database!;
+    if (_inMemory) {
+      if (_instanceDb != null && _instanceDb!.isOpen) return _instanceDb!;
+      _instanceDb = await _initDB();
+      return _instanceDb!;
+    }
+    if (_database != null && _database!.isOpen) return _database!;
     try {
       _database = await _initDB();
       return _database!;
@@ -130,8 +137,13 @@ class LocalQueueService {
   /// Closes the database connection. Important for in-memory test isolation.
   Future<void> close() async {
     _fallbackStore.clear();
+    final inst = _instanceDb;
+    if (inst != null && inst.isOpen) {
+      await inst.close();
+      _instanceDb = null;
+    }
     final db = _database;
-    if (db != null) {
+    if (db != null && db.isOpen) {
       await db.close();
       _database = null;
     }

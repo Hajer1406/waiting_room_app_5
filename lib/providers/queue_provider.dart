@@ -21,6 +21,7 @@ class QueueProvider extends ChangeNotifier {
 
   RealtimeChannel? _channel;
   bool _isDisposed = false; // Guard against notifyListeners() after dispose()
+  Future<void>? _initFuture;
 
   // ── Constructors ───────────────────────────────────────────────────────────
 
@@ -33,7 +34,7 @@ class QueueProvider extends ChangeNotifier {
   })  : _supabase = supabaseClient ?? _getSafeSupabaseClient(),
         _geoService = geoService ?? GeolocationService(),
         _localDb = localDb ?? LocalQueueService() {
-    _initialize();
+    _initFuture = _initialize();
   }
 
   /// Testing constructor: accepts a real Supabase client (integration tests).
@@ -41,7 +42,7 @@ class QueueProvider extends ChangeNotifier {
       : _supabase = supabase,
         _geoService = GeolocationService(),
         _localDb = LocalQueueService() {
-    _initialize();
+    _initFuture = _initialize();
   }
 
   /// Mock-friendly constructor for unit tests with full injection.
@@ -52,7 +53,7 @@ class QueueProvider extends ChangeNotifier {
   })  : _supabase = supabaseClient,
         _geoService = geoService,
         _localDb = localDb {
-    _initialize();
+    _initFuture = _initialize();
   }
 
   static SupabaseClient? _getSafeSupabaseClient() {
@@ -123,6 +124,7 @@ class QueueProvider extends ChangeNotifier {
   // ── Public Actions ─────────────────────────────────────────────────────────
 
   Future<String?> addClient(String name) async {
+    if (_initFuture != null) await _initFuture;
     final trimmed = name.trim();
     if (trimmed.isEmpty) {
       debugPrint('Cannot add empty client name');
@@ -164,6 +166,7 @@ class QueueProvider extends ChangeNotifier {
   }
 
   Future<String?> removeClient(String id) async {
+    if (_initFuture != null) await _initFuture;
     // 1. Remove from local UI immediately
     _clients.removeWhere((c) => c.id == id || c.name == id);
     notifyListeners();
