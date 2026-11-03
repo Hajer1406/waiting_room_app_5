@@ -19,36 +19,49 @@ void main() {
     databaseFactory = databaseFactoryFfi;
   });
 
-  QueueProvider createTestProvider() {
-    return QueueProvider(
+  late LocalQueueService localDb;
+  late QueueProvider provider;
+
+  setUp(() {
+    localDb = LocalQueueService(inMemory: true);
+    provider = QueueProvider.withDependencies(
+      supabaseClient: null,
       geoService: _FakeGeoService(),
-      localDb: LocalQueueService(inMemory: true),
+      localDb: localDb,
     );
+  });
+
+  tearDown(() async {
+    provider.dispose();
+    await localDb.close();
+  });
+
+  Future<void> pumpRealAsync(WidgetTester tester, [int ms = 200]) async {
+    await tester.runAsync(() async {
+      await Future.delayed(Duration(milliseconds: ms));
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
   }
 
   testWidgets('should add a new client to the list on button tap',
       (WidgetTester tester) async {
     // ARRANGE
     await tester.pumpWidget(
-      ChangeNotifierProvider(
-        create: (context) => createTestProvider(),
+      ChangeNotifierProvider<QueueProvider>.value(
+        value: provider,
         child: const WaitingRoomApp(),
       ),
     );
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 100);
 
     // ACT
     await tester.enterText(find.byType(TextField), 'Alice');
     await tester.pump();
     await tester.tap(find.byType(ElevatedButton));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 200);
 
     // ASSERT
-    for (final element in find.byType(Text).evaluate()) {
-      debugPrint('Found Text widget: "${(element.widget as Text).data}"');
-    }
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('Clients in Queue: 1'), findsOneWidget);
   });
@@ -58,27 +71,23 @@ void main() {
       (WidgetTester tester) async {
     // ARRANGE
     await tester.pumpWidget(
-      ChangeNotifierProvider(
-        create: (context) => createTestProvider(),
+      ChangeNotifierProvider<QueueProvider>.value(
+        value: provider,
         child: const WaitingRoomApp(),
       ),
     );
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 100);
 
     await tester.enterText(find.byType(TextField), 'Bob');
     await tester.pump();
     await tester.tap(find.byType(ElevatedButton));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 200);
 
     expect(find.text('Bob'), findsOneWidget);
 
     // ACT
     await tester.tap(find.byIcon(Icons.delete));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 200);
 
     // ASSERT
     expect(find.text('Bob'), findsNothing);
@@ -90,35 +99,30 @@ void main() {
       (WidgetTester tester) async {
     // ARRANGE
     await tester.pumpWidget(
-      ChangeNotifierProvider(
-        create: (context) => createTestProvider(),
+      ChangeNotifierProvider<QueueProvider>.value(
+        value: provider,
         child: const WaitingRoomApp(),
       ),
     );
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 100);
 
     // Add two clients to the list first
     await tester.enterText(find.byType(TextField), 'Client A');
     await tester.pump();
     await tester.tap(find.byType(ElevatedButton));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 200);
 
     await tester.enterText(find.byType(TextField), 'Client B');
     await tester.pump();
     await tester.tap(find.byType(ElevatedButton));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 200);
 
     // ACT
     await tester.tap(find.byKey(const Key('nextClientButton')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpRealAsync(tester, 200);
 
     // ASSERT
+    expect(find.text('Client A'), findsNothing);
     expect(find.text('Client B'), findsOneWidget);
     expect(find.text('Clients in Queue: 1'), findsOneWidget);
   });
